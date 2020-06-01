@@ -1,4 +1,4 @@
-Rcpp::sourceCpp("code/Multivariate_case/adapt_BNP_multivariate_helpers.cpp")
+Rcpp::sourceCpp("code/multivariate_case/adapt_BNP_multivariate_helpers.cpp")
 library(LaplacesDemon)
 library(MCMCpack)
 
