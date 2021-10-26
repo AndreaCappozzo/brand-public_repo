@@ -7,20 +7,16 @@ library(ggplot2)
 library(mcclust.ext)
 library(tidyverse)
 library(forecast)
-library(adaptDA)
+library(adaptDA) # install.packages("~/Downloads/adaptDA_1.0.tar",repos = NULL, type = "source")
 library(raedda) # remotes::install_github("AndreaCappozzo/raedda")
 library(foreach)
 library(parallel)
 library(patchwork)
 library(xtable)
 library(doRNG)
+library(brand)
 
 #library(BNPadaptRDA)
-
-source("code/multivariate_case/adapt_BNP_multivariate_SLICE.R")
-major.vote <- function(x) {
-  as.numeric(names(sort(table(x), decreasing = TRUE))[1])
-}
 
 N <- 1000
 M <- 1000
@@ -54,8 +50,13 @@ SIGMA <-
 BURN_IN <- 20000
 length_chain <- 20000
 
+novelty_size <- "not_small"
+label_noise <- TRUE
+
 sim_study_adaptBNP <-
   function(label_noise = c(TRUE, FALSE),
+           # v_tilde_train = c(10, 1000),
+           # alpha_MCD = c(.75, 1),
            novelty_size = c("small", "not_small")) {
     M_vec <- switch(
       novelty_size,
@@ -93,6 +94,7 @@ sim_study_adaptBNP <-
       prior <- list(
         aDir = c(rep(1, J), .1),
         aDP = .1,
+        #(.5?)
         m_H     = rep(0, p),
         k_H = .01,
         v_H = 10,
@@ -105,7 +107,7 @@ sim_study_adaptBNP <-
       
       t_adapt_BNP <- system.time(
         fit_adapt_RDA_bnp <-
-          MCMC_adaptBNP_multivariate_SLICE(
+          Brand_mlvt(
             Y = Y,
             X = X,
             categ = cl_train_label_noise,
@@ -113,7 +115,7 @@ sim_study_adaptBNP <-
             L = 20,
             burn_in = BURN_IN,
             thinning = 1,
-            NSIM = length_chain,
+            nsim = length_chain,
             fixed_alphaDP = FALSE,
             h_MCD = alpha_MCD,
             raw_MCD = FALSE,
@@ -155,6 +157,29 @@ sim_study_adaptBNP <-
     
     # COMPETITORS: AMDA and RAEDDA inductive -------------------------------------------------------------
     
+    # AMDAt
+    # t_amda_t <- system.time(fit_amda_t_list <-
+    #                           lapply(
+    #                             G:H,
+    #                             FUN = function(h)
+    #                               amdat(
+    #                                 X = X,
+    #                                 cls = cl_train_label_noise,
+    #                                 Y = Y,
+    #                                 K = h,
+    #                                 model = "qda"
+    #                               )
+    #                           ))[3]
+    #
+    # best_BIC_t <-
+    #   which.max(sapply(
+    #     1:length(fit_amda_t_list),
+    #     FUN = function(g)
+    #       fit_amda_t_list[[g]]$crit$bic
+    #   ))
+    #
+    # fit_amda_t <- fit_amda_t_list[[best_BIC_t]]
+    
     t_amda_i_1 <- Sys.time()
     fit_amda_learning <-
       adaptDA::amdai(X = X,
@@ -182,6 +207,24 @@ sim_study_adaptBNP <-
       ))
     fit_amda_i <- fit_amda_i_list[[best_BIC_i]]
     
+    # # RAEDDAt
+    #
+    # t_raedda_t <- system.time(
+    #   fit_raedda_t <- raedda_t(
+    #     X_train = X,
+    #     class_train = cl_train_label_noise,
+    #     X_test = Y,
+    #     G = NULL,
+    #     alpha_train = .1,
+    #     alpha_test = 0.05,
+    #     model_names_l = NULL,
+    #     model_names_d = NULL,
+    #     restr_factor_d = NULL,
+    #     ctrl_init = control_init(n_samp = 20, n_start_extra_classes = 50),
+    #     ctrl_EM = control_EM(nstart_EM = 100)
+    #   )
+    # )[3]
+    
     # RAEDDAi
     
     t_raedda_i <- system.time(
@@ -204,6 +247,10 @@ sim_study_adaptBNP <-
       fit_raedda_i$discovery_phase$Best$test$cl_after_trimming
     
     raedda_post_processing <- function(data = Y, fit_raedda) {
+      # I compute the comp density and I reassigned those units that have comp density
+      # higher than the quantile used to trim. Still experimental, need to think more about it
+      # FIXME needs to be modified to take into account both transductive and inductive approaches
+      # NOW IT ONLY WORKS WITH INDUCTIVE
       fit_raedda <- fit_raedda$discovery_phase
       test_density <- do.call(mclust::dens, c(
         list(
@@ -246,9 +293,12 @@ sim_study_adaptBNP <-
     
     # adaptBNP
     
+    # novelty_adapt_BNP <- which(cl_adapt_BNP == 0)
     novelty_adapt_BNP <-
       purrr::map(fit_adapt_BNP_list, ~ which(.x$cl_alpha == 0))
     
+    # prop_hidden_groups_adaptBNP <-
+    #   mean(novelty_adapt_BNP %in% obs_hidden_groups)
     prop_hidden_groups_adaptBNP <-
       map_dbl(novelty_adapt_BNP, ~ mean(.x %in% obs_hidden_groups))
     
@@ -312,6 +362,13 @@ sim_study_adaptBNP <-
       map_dbl(purrr::map(cl_hat, .f = ~ .x[cl_test < 4]), ~
                 mean(cl_test[cl_test < 4] == .x))
     
+    # # ARI on the novelties only
+    #
+    # ARI_on_the_novelty_subset <-
+    #   map_dbl(purrr::map(cl_hat, .f = ~ .x[cl_test >= 4]),
+    #           ~
+    #             mclust::adjustedRandIndex(x = cl_test[cl_test >= 4], y = .x))
+    
     # Results collection ------------------------------------------------------
     
     model_names <-
@@ -333,11 +390,12 @@ sim_study_adaptBNP <-
     names(comp_times) <- model_names[-6]
     names(ARI) <- names(accuracy_on_the_known_subset) <-
       names(precision_hidden_group) <-
-       model_names
+      model_names
     
     res <-
       list(
         ARI = ARI,
+        # ARI_on_the_novelty_subset = ARI_on_the_novelty_subset,
         accuracy_on_the_known_subset = accuracy_on_the_known_subset,
         precision_hidden_group = precision_hidden_group,
         comp_times = comp_times,
@@ -359,6 +417,7 @@ sim_study_adaptBNP <-
   }
 
 i <- NULL # dummy to trick R CMD check
+# NSIM <- 100
 MC_SIM <- 100
 
 #THE FOLLOWING LINE TRIGGERS THE SIMULATION STUDY
@@ -370,22 +429,8 @@ for (perc_novelty in c("small", "not_small")) {
   for (lb in c(TRUE, FALSE)) {
     out <- foreach(
       i = 1:MC_SIM,
-      .noexport = c(
-        "Upd_alphabeta_cpp_SLICE",
-        "Update_Theta_cpp_TRAIN",
-        "Update_Theta_cpp",
-        "StickBreaker_cpp",
-        "Upd_alphabeta_cpp",
-        "dmvnrm_arma",
-        "LogSumExp",
-        "UPD_Sticks_Beta_cpp",
-        "sasa",
-        "Upd_alphabeta_cpp_SLICE",
-        "Upd_Zeta_cpp"
-      ),
-      .packages = c("Rcpp", "RcppArmadillo")
+      .packages = c("Rcpp", "RcppArmadillo","mvnfast", "purrr", "mclust", "brand", "adaptDA", "raedda")
     ) %dopar% {
-      Rcpp::sourceCpp("code/Multivariate_case/adapt_BNP_multivariate_helpers.cpp")
       set.seed(i*10) # reproducibility
       out <- sim_study_adaptBNP(label_noise = lb,
                                 novelty_size = perc_novelty)
@@ -394,7 +439,7 @@ for (perc_novelty in c("small", "not_small")) {
     saveRDS(
       out,
       file = paste0(
-        "code/SIM_STUDY/sim_results/sim_study_adaptDA_BNP_label_noise_",
+        "Codice_review/multivariate_case/results/REVIEWsim_study_adaptDA_BNP_label_noise_",
         lb,
         "_novelty_",
         perc_novelty,
@@ -420,7 +465,7 @@ for (perc_novelty in c("small", "not_small")) {
 theme_set(theme_bw())
 
 collected_results_names <-
-  list.files("code/SIM_STUDY/sim_results/") %>%
+  str_subset(list.files("Codice_review/multivariate_case/results/"),pattern = "^RE") %>%
   str_split(pattern = "_",
             n = 5,
             simplify = TRUE) %>%
@@ -428,8 +473,8 @@ collected_results_names <-
   str_remove(pattern = "\\.Rds")
 
 sim_results <-
-  lapply(list.files("code/SIM_STUDY/sim_results/"), function(file)
-    readRDS(paste0("code/SIM_STUDY/sim_results/", file)))
+  lapply(str_subset(list.files("Codice_review/multivariate_case/results/"),pattern = "^RE"), function(file)
+    readRDS(paste0("Codice_review/multivariate_case/results/", file)))
 
 names(sim_results) <- collected_results_names
 
@@ -447,6 +492,7 @@ sim_names_split[, 4] <-
 
 metrics_name <- # Metrics I want to extract from simulations
   c("ARI",
+    # "ARI_on_the_novelty_subset",
     "accuracy_on_the_known_subset",
     "precision_hidden_group")
 
@@ -459,7 +505,7 @@ tidy_BNP_name <- function(text) {
     values_extraction[, 1] <- "0.75"
   }
   paste0(
-    "BRAND~",
+    "Brand~",
     "(",
     "list(eta[MCD]==~",
     values_extraction[, 1],
@@ -514,7 +560,7 @@ df_metric <-
 
 df_metric <- df_metric %>% 
   filter(method!="RAEDDA") %>% # I keep only the RAEDDA with MAP and I call it RAEDDA
-  mutate(method=fct_recode(.f = df_metric$method, "RAEDDA"="RAEDDA_with_MAP"))
+  dplyr::mutate(method=fct_recode(.f = method, "RAEDDA"="RAEDDA_with_MAP"))
 
 boxplot_creator <- function(df, selected_metric, y_ticks = TRUE) {
   metric_name_4_plot <-
@@ -536,6 +582,16 @@ boxplot_creator <- function(df, selected_metric, y_ticks = TRUE) {
                scales = "free",
                labeller = label_parsed) +
     scale_y_discrete(labels = ifelse(y_ticks, scales::label_parse(), list(NULL)))
+  
+  # gg_p <- df_metric %>%
+  #   filter(metric == "ARI", novelty_size == "novelty_not_small") %>%
+  #   ggplot() +
+  #   labs(x = "", y = selected_metric) +
+  #   geom_boxplot(aes(method, value)) +
+  #   facet_grid(label_noise ~ alpha_MCD,
+  #              scales = "free",
+  #              labeller = label_parsed)
+  # gg_p + gg_p_small
 }
 
 boxplot_creator(df = df_metric,
@@ -550,10 +606,10 @@ walk(
   metrics_name,
   .f = ~ ggsave(
     filename = paste0(
-      "~/Google Drive/university/research/publications/Amda_BNP/output/figures/boxplot_",
+      "~/Google Drive/university/research/publications/BRAND/after_review/figures/boxplot_",
       # change it accordingly
       .x,
-      ".pdf"
+      "_REVIEW.pdf"
     ),
     plot = boxplot_creator(df = df_metric, selected_metric = .x),
     width = 6.97,
@@ -564,11 +620,12 @@ walk(
 # Hex plot PPN ------------------------------------------------------------
 
 
-hex_df <- # takes ~ 1 min
+hex_df <- # takes ~ 1 min, probably it is shitty implemented
   map_dfr(.x = 1:length(sim_results),
           metric_collector,
           a_post_prob = TRUE)
-
+hex_df <- hex_df %>% 
+  filter(!(V1>8 & V2>2))
 ggplot(
   filter(hex_df, novelty_size == "Novelty~size==~Not~small"),
   mapping = aes(V1, V2, z = a_posteriori_prob_novelty)
@@ -584,9 +641,9 @@ ggplot(
 
 ggsave(
   filename = paste0(
-    "~/Google Drive/university/research/publications/Amda_BNP/output/figures/hex_plot",
+    "~/Google Drive/university/research/publications/BRAND/after_review/figures/hex_plot",
     # change it accordingly
-    ".pdf"
+    "_REVIEW.pdf"
   ),
   plot = last_plot(),
   width = 13,
